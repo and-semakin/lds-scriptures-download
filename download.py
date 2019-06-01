@@ -1,7 +1,10 @@
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 import json
 import logging
 import dataclasses
+import time
+import pathlib
+import copy
 
 import requests
 from bs4 import BeautifulSoup
@@ -23,6 +26,14 @@ class ChapterEntry:
     summary: List[str]
     verses: List[str]
 
+    def _asdict(self) -> Dict[str, Any]:
+        return {
+            "url": self.url,
+            "name": self.name,
+            "summary": copy.copy(self.summary),
+            "verses": copy.copy(self.verses),
+        }
+
 
 @dataclasses.dataclass
 class BookEntry:
@@ -34,20 +45,47 @@ class BookEntry:
     summary: Optional[List[str]] = None
     text: Optional[List[str]] = None
 
+    def _asdict(self) -> Dict[str, Any]:
+        chapters = (
+            [chapter._asdict() for chapter in self.chapters] if self.chapters else None
+        )
+        return {
+            "url": self.url,
+            "id": self.id,
+            "full_localized_name": self.full_localized_name,
+            "has_chapters": self.has_chapters,
+            "chapters": chapters,
+            "summary": copy.copy(self.summary),
+            "text": copy.copy(self.text),
+        }
 
-def dataclass_to_json(o):
-    if dataclasses.is_dataclass(o):
-        return dataclasses.asdict(o)
-    raise TypeError
+
+class NoPrimaryContentFoundError(Exception):
+    pass
+
+
+class NoRetriesLeftError(Exception):
+    pass
 
 
 def get_primary_content(url: str) -> Tag:
     logging.info(f"Requesting {url}...")
-    response: requests.Response = requests.get(url)
-    html_doc = response.text
-    soup = BeautifulSoup(html_doc, "html5lib")
-    primary_content = soup.find(id="primary")
-    return primary_content
+    retries = 5
+    while retries:
+        try:
+            response: requests.Response = requests.get(url)
+            html_doc = response.text
+            soup = BeautifulSoup(html_doc, "html5lib")
+            primary_content = soup.find(id="primary")
+            if primary_content is None:
+                raise NoPrimaryContentFoundError
+            return primary_content
+        except NoPrimaryContentFoundError:
+            logging.warning(f"Retrying to make a request to {url}...")
+            retries -= 1
+            time.sleep(2)
+            continue
+    raise NoRetriesLeftError(html_doc)
 
 
 def _get_striped_paragraphs(text: str) -> List[str]:
@@ -69,7 +107,7 @@ def book_has_chapters(book_url: str, book_main_content: Tag) -> bool:
     )
 
 
-def get_books(lang: language) -> List[BookEntry]:
+def get_books(lang: language) -> List[Dict[str, Any]]:
     logging.info(f"Getting books for {lang} language...")
     primary_content: Tag = get_primary_content(f"{book_main_url}?lang={lang.value}")
     toc: Tag = primary_content.find(class_="table-of-contents")
@@ -112,7 +150,8 @@ def get_books(lang: language) -> List[BookEntry]:
                     text=paragraphs,
                 )
             )
-    return book_entries
+    books = [book._asdict() for book in book_entries]
+    return books
 
 
 def get_chapters(book_url: str, book_contents: Tag) -> List[ChapterEntry]:
@@ -141,20 +180,25 @@ def get_chapters(book_url: str, book_contents: Tag) -> List[ChapterEntry]:
 
 def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
     logging.info(f"Getting verses for chapter on {url}...")
-    chapter_name: str = chapter_contents.select_one(".title-number").text
-    chapter_summary: List[str] = _get_striped_paragraphs(
-        chapter_contents.select_one(".study-summary").text
-    )
-    article: Tag = chapter_contents.select_one("div.article")
-    for tag in article.find_all("sup", class_="studyNoteMarker"):
-        tag.clear()
-    for tag in article.find_all("span", class_="verse-number"):
-        tag.clear()
+    try:
+        chapter_name_tag: Tag = chapter_contents.select_one(".title-number")
+        chapter_name: str = chapter_name_tag.text
+        chapter_summary: List[str] = _get_striped_paragraphs(
+            chapter_contents.select_one(".study-summary").text
+        )
+        article: Tag = chapter_contents.select_one("div.article")
+        for tag in article.find_all("sup", class_="studyNoteMarker"):
+            tag.clear()
+        for tag in article.find_all("span", class_="verse-number"):
+            tag.clear()
 
-    verses = _get_striped_paragraphs(article.text)
-    return ChapterEntry(
-        url=url, name=chapter_name, summary=chapter_summary, verses=verses
-    )
+        verses = _get_striped_paragraphs(article.text)
+        return ChapterEntry(
+            url=url, name=chapter_name, summary=chapter_summary, verses=verses
+        )
+    except AttributeError:
+        logging.error(f"Some attributes are missing on page: {str(chapter_contents)}")
+        raise
 
 
 if __name__ == "__main__":
@@ -165,4 +209,4 @@ if __name__ == "__main__":
     # book_contents = get_primary_content(url)
     # chapters = get_chapters(url, book_contents)
     with open("bom-rus.json", "w") as f:
-        json.dump(books, f, default=dataclass_to_json, ensure_ascii=False)
+        json.dump(books, f, ensure_ascii=False)
