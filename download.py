@@ -1,144 +1,31 @@
-from typing import NamedTuple, List, Optional, Any
+from typing import List, Optional
 import json
 import logging
+import dataclasses
 
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
+from languages import language
+
+logging.basicConfig(
+    format="[%(asctime)s]\t%(levelname)s\t|\t%(message)s", level=logging.INFO
+)
 
 book_main_url = "https://www.lds.org/scriptures/bofm"
 
-language_codes = [
-    "afr",
-    "alb",
-    "amh",
-    "apw",
-    "ara",
-    "ase",
-    "aym",
-    "ben",
-    "bik",
-    "bis",
-    "bul",
-    "cag",
-    "cak",
-    "cat",
-    "ceb",
-    "ces",
-    "chk",
-    "cuk",
-    "dan",
-    "deu",
-    "efi",
-    "ell",
-    "eng",
-    "ept",
-    "est",
-    "eus",
-    "fat",
-    "fij",
-    "fin",
-    "fra",
-    "gil",
-    "grn",
-    "guz",
-    "hat",
-    "hif",
-    "hil",
-    "hin",
-    "hmn",
-    "hmo",
-    "hrv",
-    "hun",
-    "hye",
-    "ibo",
-    "ilo",
-    "ind",
-    "isl",
-    "ita",
-    "jpn",
-    "kam",
-    "kat",
-    "kaz",
-    "kek",
-    "khm",
-    "kin",
-    "kor",
-    "kos",
-    "lao",
-    "lav",
-    "lin",
-    "lit",
-    "mah",
-    "mam",
-    "mkd",
-    "mlg",
-    "mlt",
-    "mon",
-    "msa",
-    "mya",
-    "nav",
-    "nep",
-    "nld",
-    "nor",
-    "pag",
-    "pam",
-    "pap",
-    "pau",
-    "pes",
-    "pol",
-    "pon",
-    "por",
-    "quc",
-    "quh",
-    "quz",
-    "qvi",
-    "rar",
-    "ron",
-    "rus",
-    "sin",
-    "slk",
-    "slv",
-    "smo",
-    "sna",
-    "sot",
-    "spa",
-    "srp",
-    "swa",
-    "swe",
-    "tah",
-    "tam",
-    "tel",
-    "tgl",
-    "tha",
-    "ton",
-    "tpi",
-    "tsn",
-    "tur",
-    "twi",
-    "tzo",
-    "ukr",
-    "urd",
-    "vie",
-    "war",
-    "xho",
-    "yap",
-    "yor",
-    "zho",
-    "zhs",
-    "zul",
-]
 
-
-class ChapterEntry(NamedTuple):
+@dataclasses.dataclass
+class ChapterEntry:
     url: str
     name: str
     summary: List[str]
     verses: List[str]
 
 
-class BookEntry(NamedTuple):
+@dataclasses.dataclass
+class BookEntry:
     url: str
     id: str
     full_localized_name: str
@@ -148,15 +35,14 @@ class BookEntry(NamedTuple):
     text: Optional[List[str]] = None
 
 
-class NamedTupleJSONEncoder(json.JSONEncoder):
-    def default(self, o: Any) -> Any:
-        if isinstance(o, NamedTuple):
-            return o._asdict()
-        return json.JSONEncoder.default(self, o)
+def dataclass_to_json(o):
+    if dataclasses.is_dataclass(o):
+        return dataclasses.asdict(o)
+    raise TypeError
 
 
 def get_primary_content(url: str) -> Tag:
-    logging.debug(f"Requesting {url}...")
+    logging.info(f"Requesting {url}...")
     response: requests.Response = requests.get(url)
     html_doc = response.text
     soup = BeautifulSoup(html_doc, "html5lib")
@@ -169,7 +55,7 @@ def _get_striped_paragraphs(text: str) -> List[str]:
 
 
 def book_has_chapters(book_url: str, book_main_content: Tag) -> bool:
-    logging.debug(f"Checking if book has chapters: {book_url}")
+    logging.info(f"Checking if book has chapters: {book_url}")
     book_url = book_url.split("?lang")[0]
     book_url_last_section = book_url.split("/")[-1]
     book_url_contains_chapter_number = True
@@ -183,9 +69,9 @@ def book_has_chapters(book_url: str, book_main_content: Tag) -> bool:
     )
 
 
-def get_books(lang: str) -> List[BookEntry]:
-    logging.debug(f"Getting books for {lang} language...")
-    primary_content: Tag = get_primary_content(f"{book_main_url}?lang={lang}")
+def get_books(lang: language) -> List[BookEntry]:
+    logging.info(f"Getting books for {lang} language...")
+    primary_content: Tag = get_primary_content(f"{book_main_url}?lang={lang.value}")
     toc: Tag = primary_content.find(class_="table-of-contents")
     book_entries = []
     for link in toc.select("li > a.tocEntry"):
@@ -230,7 +116,7 @@ def get_books(lang: str) -> List[BookEntry]:
 
 
 def get_chapters(book_url: str, book_contents: Tag) -> List[ChapterEntry]:
-    logging.debug(f"Getting chapters for {book_url}...")
+    logging.info(f"Getting chapters for {book_url}...")
     book_url_without_lang = book_url.split("?lang")[0]
     book_url_last_section = book_url_without_lang.split("/")[-1]
     book_url_contains_chapter_number = True
@@ -254,7 +140,7 @@ def get_chapters(book_url: str, book_contents: Tag) -> List[ChapterEntry]:
 
 
 def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
-    logging.debug(f"Getting verses for chapter on {url}...")
+    logging.info(f"Getting verses for chapter on {url}...")
     chapter_name: str = chapter_contents.select_one(".title-number").text
     chapter_summary: List[str] = _get_striped_paragraphs(
         chapter_contents.select_one(".study-summary").text
@@ -272,11 +158,11 @@ def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
 
 
 if __name__ == "__main__":
-    logging.info("Starting")
-    lang = "rus"
+    logging.info("Starting...")
+    lang = language.RUS
     books = get_books(lang)
     # url = "https://www.lds.org/scriptures/bofm/1-ne?lang=rus"
     # book_contents = get_primary_content(url)
     # chapters = get_chapters(url, book_contents)
     with open("bom-rus.json", "w") as f:
-        json.dump(books, f, cls=NamedTupleJSONEncoder, ensure_ascii=False)
+        json.dump(books, f, default=dataclass_to_json, ensure_ascii=False)
