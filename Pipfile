@@ -8,6 +8,7 @@ black = "*"
 flake8 = "*"
 mypy = "*"
 rope = "*"
+ipython = "*"
 
 [packages]
 requests = "*"
