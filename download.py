@@ -93,7 +93,6 @@ def _get_striped_paragraphs(text: str) -> List[str]:
 
 
 def book_has_chapters(book_url: str, book_main_content: Tag) -> bool:
-    logging.info(f"Checking if book has chapters: {book_url}")
     book_url = book_url.split("?lang")[0]
     book_url_last_section = book_url.split("/")[-1]
     book_url_contains_chapter_number = True
@@ -107,7 +106,7 @@ def book_has_chapters(book_url: str, book_main_content: Tag) -> bool:
     )
 
 
-def get_books(lang: language) -> List[Dict[str, Any]]:
+def get_books(lang: language, excluded_books=["illustrations"]) -> List[Dict[str, Any]]:
     logging.info(f"Getting books for {lang} language...")
     primary_content: Tag = get_primary_content(f"{book_main_url}?lang={lang.value}")
     toc: Tag = primary_content.find(class_="table-of-contents")
@@ -116,6 +115,8 @@ def get_books(lang: language) -> List[Dict[str, Any]]:
         li: Tag = link.parent
         book_url: str = link["href"]
         book_id: str = li["id"]
+        if book_id in excluded_books:
+            continue
         book_name: str = link.string
         book_contents: Tag = get_primary_content(book_url)
         if book_has_chapters(book_url, book_contents):
@@ -203,10 +204,10 @@ def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
 
 if __name__ == "__main__":
     logging.info("Starting...")
-    lang = language.RUS
-    books = get_books(lang)
-    # url = "https://www.lds.org/scriptures/bofm/1-ne?lang=rus"
-    # book_contents = get_primary_content(url)
-    # chapters = get_chapters(url, book_contents)
-    with open("bom-rus.json", "w") as f:
-        json.dump(books, f, ensure_ascii=False)
+    for lang in language:
+        logging.info("=" * 40)
+        logging.info(f"Downloading {lang}...")
+        books = get_books(lang)
+        output_json = pathlib.Path(f"bom-{lang.value}.json")
+        with output_json.open("w") as f:
+            json.dump(books, f, ensure_ascii=False)
