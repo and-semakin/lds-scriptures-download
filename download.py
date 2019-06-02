@@ -237,7 +237,6 @@ if __name__ == "__main__":
                 books = get_books(lang)
                 with output_json.open("w") as f:
                     json.dump(books, f, ensure_ascii=False, indent=4)
-                break
             except Exception as e:
                 if isinstance(e, NoTranslationAvailableError):
                     logging.error(f"No translation available for {lang}, skipping.")
@@ -245,5 +244,7 @@ if __name__ == "__main__":
                 else:
                     retries -= 1
                     time.sleep(10)
+            else:
+                break
         else:
             raise NoRetriesLeftError
