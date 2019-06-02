@@ -68,6 +68,10 @@ class NoRetriesLeftError(Exception):
     pass
 
 
+class NoTranslationAvailableError(Exception):
+    pass
+
+
 def get_primary_content(url: str) -> Tag:
     logging.info(f"Requesting {url}...")
     retries = 5
@@ -114,9 +118,23 @@ def get_books(lang: language, excluded_books=["illustrations"]) -> List[Dict[str
     for link in toc.select("li > a.tocEntry"):
         li: Tag = link.parent
         book_url: str = link["href"]
-        book_id: str = li["id"]
+
+        # check if book is available in lang
+        book_url_lang: str = book_url.split("lang=")[1]
+        if book_url_lang.lower() != lang.value:
+            raise NoTranslationAvailableError(lang)
+
+        # check if link is a valid book
+        try:
+            book_id: str = li["id"]
+        except AttributeError:
+            logging.warning(f"Book at {book_url} has no id, skipping.")
+            continue
+
+        # do not save books in excluded books list
         if book_id in excluded_books:
             continue
+
         book_name: str = link.string
         book_contents: Tag = get_primary_content(book_url)
         if book_has_chapters(book_url, book_contents):
@@ -204,10 +222,28 @@ def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
 
 if __name__ == "__main__":
     logging.info("Starting...")
+    output_dir = pathlib.Path("output")
+    output_dir.mkdir(exist_ok=True)
     for lang in language:
-        logging.info("=" * 40)
-        logging.info(f"Downloading {lang}...")
-        books = get_books(lang)
-        output_json = pathlib.Path(f"bom-{lang.value}.json")
-        with output_json.open("w") as f:
-            json.dump(books, f, ensure_ascii=False)
+        retries = 3
+        while retries:
+            try:
+                logging.info("=" * 40)
+                logging.info(f"Downloading {lang}...")
+                output_json: pathlib.Path = output_dir / f"bom-{lang.value}.json"
+                if output_json.exists():
+                    logging.info(f"File already exists, skipping.")
+                    break
+                books = get_books(lang)
+                with output_json.open("w") as f:
+                    json.dump(books, f, ensure_ascii=False, indent=4)
+                break
+            except Exception as e:
+                if isinstance(e, NoTranslationAvailableError):
+                    logging.error(f"No translation available for {lang}, skipping.")
+                    break
+                else:
+                    retries -= 1
+                    time.sleep(10)
+        else:
+            raise NoRetriesLeftError
