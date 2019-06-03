@@ -5,6 +5,7 @@ import dataclasses
 import time
 import pathlib
 import copy
+import concurrent.futures
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,10 +19,13 @@ logging.basicConfig(
 
 book_main_url = "https://www.lds.org/scriptures/bofm"
 
+pool = concurrent.futures.ThreadPoolExecutor(max_workers=20)
+
 
 @dataclasses.dataclass
 class ChapterEntry:
     url: str
+    number: int
     name: str
     summary: List[str]
     verses: List[str]
@@ -29,6 +33,7 @@ class ChapterEntry:
     def _asdict(self) -> Dict[str, Any]:
         return {
             "url": self.url,
+            "number": self.number,
             "name": self.name,
             "summary": copy.copy(self.summary),
             "verses": copy.copy(self.verses),
@@ -127,7 +132,7 @@ def get_books(lang: language, excluded_books=["illustrations"]) -> List[Dict[str
         # check if link is a valid book
         try:
             book_id: str = li["id"]
-        except AttributeError:
+        except KeyError:
             logging.warning(f"Book at {book_url} has no id, skipping.")
             continue
 
@@ -184,20 +189,25 @@ def get_chapters(book_url: str, book_contents: Tag) -> List[ChapterEntry]:
         book_url_contains_chapter_number = False
 
     if book_url_contains_chapter_number:
-        return [get_chapter_data(url=book_url, chapter_contents=book_contents)]
+        return [
+            get_chapter_data(url=book_url, number=1, chapter_contents=book_contents)
+        ]
 
     chapters_list: Tag = book_contents.select_one("ul.jump-to-chapter")
     assert chapters_list
-    chapters: List[ChapterEntry] = []
-    for link in chapters_list.find_all("a"):
+
+    def load_chapter(link: Tag) -> ChapterEntry:
+        chapter_number: int = int(link.string.strip())
         chapter_url: str = link["href"]
         chapter_contents = get_primary_content(chapter_url)
-        chapters.append(get_chapter_data(chapter_url, chapter_contents))
+        return get_chapter_data(chapter_url, chapter_number, chapter_contents)
 
+    chapters_iter = pool.map(load_chapter, chapters_list.find_all("a"))
+    chapters: List[ChapterEntry] = sorted(chapters_iter, key=lambda c: c.number)
     return chapters
 
 
-def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
+def get_chapter_data(url: str, number: int, chapter_contents: Tag) -> ChapterEntry:
     logging.info(f"Getting verses for chapter on {url}...")
     try:
         chapter_name_tag: Tag = chapter_contents.select_one(".title-number")
@@ -213,7 +223,11 @@ def get_chapter_data(url: str, chapter_contents: Tag) -> ChapterEntry:
 
         verses = _get_striped_paragraphs(article.text)
         return ChapterEntry(
-            url=url, name=chapter_name, summary=chapter_summary, verses=verses
+            url=url,
+            number=number,
+            name=chapter_name,
+            summary=chapter_summary,
+            verses=verses,
         )
     except AttributeError:
         logging.error(f"Some attributes are missing on page: {str(chapter_contents)}")
@@ -225,26 +239,29 @@ if __name__ == "__main__":
     output_dir = pathlib.Path("output")
     output_dir.mkdir(exist_ok=True)
     for lang in language:
+        logging.info("=" * 40)
+        logging.info(f"Downloading {lang}...")
+        output_json: pathlib.Path = output_dir / f"bom-{lang.value}.json"
+        if output_json.exists():
+            logging.info(f"File already exists, skipping.")
+            continue
+
         retries = 3
         while retries:
             try:
-                logging.info("=" * 40)
-                logging.info(f"Downloading {lang}...")
-                output_json: pathlib.Path = output_dir / f"bom-{lang.value}.json"
-                if output_json.exists():
-                    logging.info(f"File already exists, skipping.")
-                    break
                 books = get_books(lang)
-                with output_json.open("w") as f:
-                    json.dump(books, f, ensure_ascii=False, indent=4)
             except Exception as e:
                 if isinstance(e, NoTranslationAvailableError):
                     logging.error(f"No translation available for {lang}, skipping.")
                     break
                 else:
+                    logging.exception(f"Some error occured, retrying...")
                     retries -= 1
                     time.sleep(10)
             else:
+                logging.info(f"Saving JSON data for {lang}...")
+                with output_json.open("w") as f:
+                    json.dump(books, f, ensure_ascii=False, indent=4)
                 break
         else:
             raise NoRetriesLeftError
