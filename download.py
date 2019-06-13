@@ -18,7 +18,7 @@ logging.basicConfig(
     format="[%(asctime)s]\t%(levelname)s\t|\t%(message)s", level=logging.INFO
 )
 
-pool = concurrent.futures.ThreadPoolExecutor(max_workers=20)
+pool = concurrent.futures.ThreadPoolExecutor(max_workers=30)
 
 LDS_BASE_URL = "https://www.churchofjesuschrist.org"
 SCRIPTURES_BASE_URL = f"{LDS_BASE_URL}/study/scriptures"
@@ -36,13 +36,19 @@ class NoTranslationAvailableError(Exception):
     pass
 
 
-def get_reader_store(url: str) -> Dict[str, Any]:
+def get_reader_store(url: str, raise_no_translation: bool = False) -> Dict[str, Any]:
     logging.info(f"Requesting {url}...")
     retries = 5
     html_doc = None
     while retries:
         try:
             response: requests.Response = requests.get(url)
+            if response.status_code != 200:
+                if raise_no_translation:
+                    raise NoTranslationAvailableError(url)
+                else:
+                    raise NoPrimaryContentFoundError
+
             html_doc = response.text
             soup = BeautifulSoup(html_doc, "html5lib")
             scripts = soup.find_all("script")
@@ -127,7 +133,7 @@ def get_books(
     scripture_main_url: str, lang: language, excluded_books: List[str]
 ) -> Dict[str, Any]:
     logging.info(f"Getting books for {lang} language...")
-    reader: Dict[str, Any] = get_reader_store(f"{scripture_main_url}?lang={lang.value}")
+    reader: Dict[str, Any] = get_reader_store(f"{scripture_main_url}?lang={lang.value}", raise_no_translation=True)
 
     active_book = reader["activeBook"]
     book_store = reader["bookStore"][active_book]
@@ -185,26 +191,24 @@ def get_content(uri: str, lang: language) -> Dict[str, Any]:
         data["subtitle"] = _get_striped_paragraphs(subtitle.text)
 
     body_block: Tag = soup.select_one("div.body-block")
-    assert body_block is not None
+    if body_block is not None:
+        verses = body_block.select("p.verse")
+        if verses:
+            verses_data = []
 
-    verses = body_block.select("p.verse")
-    if verses:
-        verses_data = []
+            for i, verse in enumerate(verses, start=1):
+                for tag in verse.find_all("sup", class_="marker"):
+                    tag.clear()
+                for tag in verse.find_all("span", class_="verse-number"):
+                    tag.clear()
+                verses_data.append({"number": i, "text": verse.text.strip()})
 
-        for verse in verses:
-            verse_number: int = int(
-                verse.find("span", class_="verse-number").text.strip()
-            )
-            for tag in verse.find_all("sup", class_="marker"):
-                tag.clear()
-            for tag in verse.find_all("span", class_="verse-number"):
-                tag.clear()
-            verses_data.append({"number": verse_number, "text": verse.text.strip()})
-
-        data["verses"] = verses_data
+            data["verses"] = verses_data
+        else:
+            paragraphs = body_block.select("p")
+            data["text"] = [p.text.strip() for p in paragraphs]
     else:
-        paragraphs = body_block.select("p")
-        data["text"] = [p.text.strip() for p in paragraphs]
+        logging.warning(f"Here is no body for {uri}, {lang}...")
 
     return data
 
