@@ -1,4 +1,4 @@
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Mapping
 import json
 import logging
 import time
@@ -7,21 +7,33 @@ import concurrent.futures
 import re
 import base64
 import itertools
+import enum
+import argparse
 
 import requests
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from languages import language
+from languages import Language
 
 logging.basicConfig(
     format="[%(asctime)s]\t%(levelname)s\t|\t%(message)s", level=logging.INFO
 )
 
-pool = concurrent.futures.ThreadPoolExecutor(max_workers=30)
-
 LDS_BASE_URL = "https://www.churchofjesuschrist.org"
 SCRIPTURES_BASE_URL = f"{LDS_BASE_URL}/study/scriptures"
+
+
+class ScriptureType(enum.Enum):
+    BOFM: str = "bofm"
+    DC: str = "dc-testament"
+    PGP: str = "pgp"
+
+
+DEFAULT_EXCLUDED: Mapping[ScriptureType, List[str]] = {
+    ScriptureType.BOFM: ["/study/scriptures/bofm/illustrations"],
+    ScriptureType.DC: ["/study/scriptures/dc-testament/chron-order"],
+}
 
 
 class NoPrimaryContentFoundError(Exception):
@@ -130,10 +142,15 @@ def get_uris_from_entries(entries: List[Dict[str, Any]]) -> List[str]:
 
 
 def get_books(
-    scripture_main_url: str, lang: language, excluded_books: List[str]
+    scripture_main_url: str,
+    lang: Language,
+    excluded_books: List[str],
+    pool: concurrent.futures._base.Executor,
 ) -> Dict[str, Any]:
     logging.info(f"Getting books for {lang} language...")
-    reader: Dict[str, Any] = get_reader_store(f"{scripture_main_url}?lang={lang.value}", raise_no_translation=True)
+    reader: Dict[str, Any] = get_reader_store(
+        f"{scripture_main_url}?lang={lang.value}", raise_no_translation=True
+    )
 
     active_book = reader["activeBook"]
     book_store = reader["bookStore"][active_book]
@@ -155,7 +172,7 @@ def get_books(
     }
 
 
-def get_content(uri: str, lang: language) -> Dict[str, Any]:
+def get_content(uri: str, lang: Language) -> Dict[str, Any]:
     logging.info(f"Getting contents for {uri}...")
     reader = get_reader_store(f"{LDS_BASE_URL}{uri}?lang={lang.value}")
 
@@ -213,40 +230,102 @@ def get_content(uri: str, lang: language) -> Dict[str, Any]:
     return data
 
 
-if __name__ == "__main__":
-    scripture = "bofm"
-    default_excluded = {"bofm": ["/study/scriptures/bofm/illustrations"]}
-    logging.info(f"Starting {scripture}...")
-    output_dir = pathlib.Path("output")
+def main(
+    scriptures: List[ScriptureType],
+    languages: List[Language],
+    output_dir: pathlib.Path,
+    pool: concurrent.futures._base.Executor,
+    overwrite: bool = False,
+) -> None:
     output_dir.mkdir(exist_ok=True)
 
-    for lang in language:
-        scripture_main_url = f"{SCRIPTURES_BASE_URL}/{scripture}"
+    for lang in languages:
         logging.info("=" * 40)
-        logging.info(f"Downloading {lang}...")
-        output_json: pathlib.Path = output_dir / f"{scripture}-{lang.value}.json"
-        if output_json.exists():
-            logging.info(f"File already exists, skipping.")
-            continue
+        logging.info(f"Starting {lang}...")
+        for scripture in scriptures:
+            logging.info("-" * 40)
+            logging.info(f"Downloading {scripture}...")
+            scripture_main_url = f"{SCRIPTURES_BASE_URL}/{scripture.value}"
+            output_json: pathlib.Path = output_dir / f"{scripture.value}-{lang.value}.json"
+            if output_json.exists() and not overwrite:
+                logging.info(f"File already exists, skipping.")
+                continue
 
-        retries = 3
-        while retries:
-            try:
-                books = get_books(
-                    scripture_main_url, lang, default_excluded.get(scripture, [])
-                )
-            except Exception as e:
-                if isinstance(e, NoTranslationAvailableError):
-                    logging.error(f"No translation available for {lang}, skipping.")
-                    break
+            retries = 3
+            while retries:
+                try:
+                    books = get_books(
+                        scripture_main_url,
+                        lang,
+                        DEFAULT_EXCLUDED.get(scripture, []),
+                        pool=pool,
+                    )
+                except Exception as e:
+                    if isinstance(e, NoTranslationAvailableError):
+                        logging.error(f"No translation available for {lang}, skipping.")
+                        break
+                    else:
+                        logging.exception(f"Some error occured, retrying...")
+                        retries -= 1
+                        time.sleep(10)
                 else:
-                    logging.exception(f"Some error occured, retrying...")
-                    retries -= 1
-                    time.sleep(10)
+                    logging.info(f"Saving JSON data for {lang}...")
+                    with output_json.open("w") as f:
+                        json.dump(books, f, ensure_ascii=False, indent=4)
+                    break
             else:
-                logging.info(f"Saving JSON data for {lang}...")
-                with output_json.open("w") as f:
-                    json.dump(books, f, ensure_ascii=False, indent=4)
-                break
-        else:
-            raise NoRetriesLeftError
+                raise NoRetriesLeftError
+    logging.info(f"Finished.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download standard works of the Church of Jesus Christ "
+            "of Latter-day Saints in machine-readable JSON format."
+        )
+    )
+    parser.add_argument(
+        "-l",
+        "--languages",
+        metavar="LANG",
+        nargs="*",
+        default=[lang.value for lang in Language],
+        help=(
+            "list of languages to download; "
+            "allowed values are 3-letters language key-codes: eng, spa, rus, fra..."
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--scriptures",
+        metavar="SCRIPTURE",
+        nargs="*",
+        default=[scripture.value for scripture in ScriptureType],
+        help="list of scriptures to download; allowed values: bofm, dc-testament, pgp",
+    )
+    parser.add_argument(
+        "-o", "--overwrite", action="store_true", help="overwrite files if they exist"
+    )
+    parser.add_argument(
+        "-t",
+        "--threads",
+        type=int,
+        default=30,
+        help="number of threads to download in parallel",
+    )
+    parser.add_argument("destination", help="path to save JSON files")
+    args = parser.parse_args()
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=args.threads)
+    languages = [Language(lang) for lang in args.languages]
+    scriptures = [ScriptureType(scripture) for scripture in args.scriptures]
+    overwrite = args.overwrite
+    output_dir = pathlib.Path(args.destination)
+    main(
+        scriptures=scriptures,
+        languages=languages,
+        output_dir=output_dir,
+        pool=pool,
+        overwrite=overwrite,
+    )

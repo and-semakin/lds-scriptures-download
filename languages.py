@@ -1,7 +1,7 @@
 import enum
 
 
-class language(enum.Enum):
+class Language(enum.Enum):
     AFR = "afr"
     ALB = "alb"
     AMH = "amh"
